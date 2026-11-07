@@ -1,0 +1,90 @@
+==========================================================================================
+                               WALK-FORWARD BACKTEST REPORT                               
+            Hybrid Nifty 50 Trading Platform - Production Pipeline Simulation             
+==========================================================================================
+Generated        : 2026-11-06 18:35 (script: walkforward_backtest.py)
+Window           : 2016-01-04 -> 2026-10-29  (10.8 years)
+Scan cadence     : every 5th Nifty trading day (weekly)
+Starting capital : Rs.100,000 (compounding; 2% of current equity risked per trade)
+Transaction cost : 0.10% of trade value per side
+ML training cap  : most recent 2000 bars (compute limit; main.py uses full history)
+
+METHODOLOGY (how faithfully main.py was simulated)
+------------------------------------------------------------------------------------------
+- Real engine classes at every scan date: MLEngine (retrained on data <= date
+  only), SmartMoneyEngine, RiskManager (ATR stop, 2% risk, 5/10/15% caps),
+  DecisionEngine (100-pt matrix, +/-30 trigger, RSI timing), MarketRegime
+  (^NSEI SMA50/200, ^INDIAVIX, full-universe breadth).
+- Entries at the NEXT trading day's open; WAIT FOR DIP / BOUNCE become limit
+  orders at the halfway trigger, valid 5 trading days.
+- Exits: scanner SL / 2.5x TP, or time stop after 20 days at close.
+  If SL and TP are touched the same day, SL is assumed first (pessimistic).
+- One position per symbol; opposite signals do not reverse open positions.
+- Positions sized by the real RiskManager on CURRENT equity (main.py uses a
+  fixed Rs.100,000 notional); allocations can never exceed available cash.
+
+KNOWN BIASES (read before trusting the numbers)
+------------------------------------------------------------------------------------------
+1. Survivorship bias: universe is TODAY'S Nifty 50 list -> results optimistic.
+2. DCF look-ahead: fundamentals are one current snapshot. FULL includes that
+   bias; NO-DCF zeroes the DCF factor and is the honest core result.
+3. Weekly cadence vs main.py's daily design; signals would be fresher daily.
+4. Trailing-stop instructions printed by main.py are not simulated.
+
+RESULTS
+------------------------------------------------------------------------------------------
+Metric                  |                 FULL |               NO-DCF |            Nifty B&H
+------------------------------------------------------------------------------------------
+Total return            |               133.7% |                32.2% |               194.4%
+CAGR                    |                 8.2% |                 2.6% |                10.5%
+Max drawdown            |               -26.6% |               -29.5% |               -38.4%
+Sharpe (daily, rf=0)    |                 0.76 |                 0.31 |                 0.71
+Final equity (Rs.)      |              233,680 |              132,198 |                    -
+Trades filled           |                2,665 |                2,557 |                    -
+Win rate                |                33.9% |                32.3% |                    -
+Profit factor           |                 1.17 |                 1.06 |                    -
+Avg win / trade         |                 7.5% |                 7.2% |                    -
+Avg loss / trade        |                -3.3% |                -3.4% |                    -
+Exits TP / SL / TIME    |     520/1655  /490    |     471/1643  /443    |                    -
+Long trades (PnL Rs.)   |    2,274 (  185,412) |    1,992 (   87,918) |                    -
+Short trades (PnL Rs.)  |      391 (  -52,127) |      565 (  -57,919) |                    -
+Avg hold (days)         |                  8.9 |                  8.7 |                    -
+Exposure (pos-days)     |               887.8% |               831.7% |                    -
+
+PER-YEAR RETURNS
+------------------------------------------------------------------------------------------
+Year      |           FULL |         NO-DCF |          Nifty
+------------------------------------------------------------------------------------------
+2016      |           2.2% |           1.1% | (see chart)
+2017      |          27.2% |          31.5% | (see chart)
+2018      |          -1.5% |          -2.7% | (see chart)
+2019      |          -1.3% |           0.6% | (see chart)
+2020      |          47.3% |           4.3% | (see chart)
+2021      |          16.5% |           1.6% | (see chart)
+2022      |          -7.1% |         -11.6% | (see chart)
+2023      |          23.1% |          15.6% | (see chart)
+2024      |          10.4% |          12.4% | (see chart)
+2025      |          -1.9% |          -3.6% | (see chart)
+2026      |         -13.0% |         -13.3% | (see chart)
+
+TOP 5 WINS AND TOP 5 LOSSES (FULL variant)
+------------------------------------------------------------------------------------------
+WIN   ETERNAL   LONG  2024-03-18 -> 2024-04-08    18.43%  (TP, score 62)
+WIN   ETERNAL   LONG  2024-07-10 -> 2024-08-01    13.70%  (TP, score 63)
+WIN   ETERNAL   LONG  2024-02-02 -> 2024-02-20    14.42%  (TP, score 78)
+WIN   ADANIENT  LONG  2021-03-17 -> 2021-03-23    20.99%  (TP, score 68)
+WIN   WIPRO     LONG  2024-01-17 -> 2024-02-16    14.30%  (TP, score 80)
+LOSS  KOTAKBANK LONG  2024-04-10 -> 2024-04-25    -7.12%  (SL, score 64)
+LOSS  ETERNAL   LONG  2024-10-07 -> 2024-10-07    -6.26%  (SL, score 60)
+LOSS  ADANIPORTSLONG  2024-12-04 -> 2024-12-23    -9.85%  (SL, score 56)
+LOSS  TRENT     LONG  2020-12-08 -> 2020-12-21    -9.39%  (SL, score 70)
+LOSS  TMPV      LONG  2021-03-12 -> 2021-03-19    -8.30%  (SL, score 69)
+
+CONCLUSION
+------------------------------------------------------------------------------------------
+Over 10.8 years the FULL signal turned Rs.100,000 into Rs.233,680 (133.7%, CAGR 8.2%) vs Nifty buy-and-hold 194.4% (CAGR 10.5%).
+With the DCF factor removed (no look-ahead), the same engine returned 32.2% (CAGR 2.6%); the 101.5% gap between FULL and NO-DCF is the maximum credit the current-
+day fundamentals snapshot can claim for historical results.
+Drawdowns: FULL -26.6%, NO-DCF -29.5%, Nifty -38.4%. All figures carry the survivorship
+and cadence biases listed above; treat them as an upper bound, not a forecast.
+==========================================================================================

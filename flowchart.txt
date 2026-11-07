@@ -1,0 +1,130 @@
+==========================================================================================
+                    SYSTEM ARCHITECTURE FLOWCHART
+==========================================================================================
+
+[PHASE 1: DATA PIPELINE] (Run Once: python import_data.py)
+──────────────────────────────────────────────────────────────────────────────────────────
+  nifty50_constituents.csv
+             │
+             ▼
+      import_data.py
+             │
+             ├──────────────────────┐
+             ▼                      ▼
+   data_fetcher.py        fundamental_fetcher.py
+   (yfinance OHLCV)       (yfinance Financials)
+             │                      │
+             ▼                      ▼
+  data/ohlcv/*.csv      data/fundamentals/*.json
+  (Prices, Volume)      (Balance Sheet, Cashflow)
+
+
+[PHASE 2: THE HYBRID ENGINE CORE] (Used by both Main & Backtester)
+──────────────────────────────────────────────────────────────────────────────────────────
+             ┌─────────────────────────────────────────┐
+             │             INPUT: OHLCV DATA           │
+             └─────────┬───────────────────┬───────────┘
+                       │                   │
+                       ▼                   ▼
+            ┌──────────────────┐  ┌───────────────────┐
+            │   ml_engine.py   │  │smart_money_engine │
+            │  (Random Forest) │  │   (OBV & Volume)  │
+            └────────┬─────────┘  └─────────┬─────────┘
+                     │ UP/DOWN/Conf          │ Accum/Distr
+                     │ RSI                   │
+                     │                       │
+  data/fundamentals/  │                       │
+         .json        │                       │
+             │        │                       │
+             ▼        │                       │
+    ┌────────────────┐│                       │
+    │ dcf_engine.py  ││                       │
+    │ (Intrinsic Val)││                       │
+    └────────┬───────┘│                       │
+             │Under/   │                       │
+             │Fair/Over│                       │
+             └────┬────┴───────────┬───────────┘
+                  │                │
+                  ▼                ▼
+         ┌─────────────────────────────────────┐
+         │        MACRO REGIME FILTER          │
+         │  (Nifty Trend, VIX, Market Breadth) │
+         └───────────────┬─────────────────────┘
+                         │
+                         ▼
+         ┌─────────────────────────────────────┐
+         │       decision_engine.py            │
+         │     (The 100-Point Scoring System)  │
+         │                                     │
+         │  ML (35) + DCF (25) + Regime (25)   │
+         │  + Smart Money (15) + Sector (5)    │
+         └───────────────┬─────────────────────┘
+                         │
+                         ▼
+               {SCORE > 30 ?}
+                /         \
+             YES           NO
+              /             \
+             ▼               ▼
+        [BUY/SELL]        [HOLD]
+             │
+             ▼
+     ┌───────────────┐
+     │risk_manager.py│
+     │ - ATR Stop    │
+     │ - 2% Risk     │
+     │ - Position Sz │
+     └───────┬───────┘
+             │
+             ▼
+   [FINAL TRADE SIGNAL: Qty, Entry, SL, TP]
+
+
+==========================================================================================
+                          SPLIT EXECUTION PATHS
+==========================================================================================
+
+PATH A: LIVE TERMINAL (python main.py)
+──────────────────────────────────────────────────────────────────────────────────────────
+  [FINAL TRADE SIGNAL]  ──►  Filters Sector Limits (Max 2 per sector)
+                                   │
+                                   ▼
+                          dashboard.py (Bloomberg UI)
+                                   │
+                                   ▼
+                          [Live Actionable Alerts on Screen]
+
+
+PATH B: PREDICTION LEADERBOARD (python backtester.py)
+──────────────────────────────────────────────────────────────────────────────────────────
+  Loads full local history per stock
+             │
+             ▼
+  Real ML Engine + real Macro Regime (same engines as PATH A)
+             │
+             ▼
+  Same Decision Engine scores each symbol
+             │
+             ▼
+  Ranks by absolute edge score
+             │
+             ▼
+  [Outputs: Top 15 Table - Symbol, Price, 5-Day Prediction, Action, Edge]
+
+
+PATH C: WALK-FORWARD VALIDATOR (python walkforward_backtest.py)
+──────────────────────────────────────────────────────────────────────────────────────────
+  Replays the full scan every 5th trading day, strictly point-in-time
+             │
+             ▼
+  ML retrained on data <= decision date (no look-ahead)
+             │
+             ▼
+  Simulated fills at next open (0.1% cost per side), SL-first pessimism
+             │
+             ▼
+  Exits at SL / 2.5x TP / 20-day time stop
+             │
+             ▼
+  [Outputs: results.json, BACKTEST_REPORT.txt, equity_curve.png
+   - PnL, CAGR, hit rate, profit factor, drawdown, per-year table]

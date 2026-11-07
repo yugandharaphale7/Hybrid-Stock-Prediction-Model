@@ -1,0 +1,484 @@
+==========================================================================================
+                     QUANTITATIVE HYBRID TRADING PLATFORM
+             System Architecture, Pipeline & Codebase Technical Report
+==========================================================================================
+Target Universe : Nifty 50 Index & Constituents (National Stock Exchange of India)
+Core Methodology: Multi-Factor Hybrid (Machine Learning + DCF + Smart Money + Macro Regime)
+Primary Scripts : import_data.py, main.py, backtester.py,
+                  walkforward_backtest.py
+Engines         : ml_engine.py, dcf_engine.py, smart_money_engine.py, 
+                  decision_engine.py, risk_manager.py, dashboard.py
+==========================================================================================
+
+
+TABLE OF CONTENTS
+-----------------
+1. Executive Summary & Quantitative Philosophy
+2. Complete System Architecture & Flowchart
+3. End-to-End Execution Pipeline
+4. The Hybrid Engine: How All Components Work Together
+   4.1. Machine Learning Engine (ml_engine.py)
+   4.2. Discounted Cash Flow Engine (dcf_engine.py)
+   4.3. Smart Money Volume Engine (smart_money_engine.py)
+   4.4. Macro Regime & Volatility Filter (risk_manager.py)
+   4.5. 100-Point Scoring Decision Matrix (decision_engine.py)
+   4.6. Position Sizing & ATR Risk Management (risk_manager.py)
+5. Deep-Dive Code Explanation: import_data.py
+6. Deep-Dive Code Explanation: main.py
+7. Deep-Dive Code Explanation: backtester.py
+8. Data Contracts & Directory Structure
+9. Operational Run Guide & CLI Commands
+
+
+==========================================================================================
+1. EXECUTIVE SUMMARY & QUANTITATIVE PHILOSOPHY
+==========================================================================================
+The system is designed to eliminate common weaknesses in purely technical or purely 
+fundamental trading models:
+
+1. Technical indicators alone produce high whipsaws and false breakouts during ranging 
+   or low-liquidity market regimes.
+2. Fundamental valuation (DCF) identifies intrinsic value but offers zero timing information;
+   an undervalued stock can remain depressed or drop further for months or years.
+3. Machine learning models in finance easily overfit to noisy price series when divorced 
+   from macro context and institutional volume dynamics.
+
+To solve this, this codebase integrates four orthogonal data dimensions into a unified 
+100-point composite score:
+   - Technical & Momentum Probability via Scikit-Learn Random Forest (Weight: 35%)
+   - Fundamental Margin of Safety via DCF Free Cash Flow to Firm (Weight: 25%)
+   - Macro Environment & Market Breadth Filter via Nifty 50 & India VIX (Weight: 25%)
+   - Institutional Volume Confirmation via On-Balance Volume & Volume Spread (Weight: 15%)
+
+Signals only trigger actionable Long (Score > 30) or Short (Score < -30) trades when 
+multiple independent factors align. If market conditions are unfavorable or signals 
+conflict, the system defaults to HOLD and keeps capital in cash.
+
+
+==========================================================================================
+2. COMPLETE SYSTEM ARCHITECTURE & FLOWCHART
+==========================================================================================
+
++----------------------------------------------------------------------------------------+
+|                          PHASE 1: DATA INGESTION & CACHING                             |
++----------------------------------------------------------------------------------------+
+                               nifty50_constituents.csv
+                                          |
+                                          v
+                                   import_data.py
+                                          |
+                    +---------------------+---------------------+
+                    |                                           |
+                    v                                           v
+             data_fetcher.py                           fundamental_fetcher.py
+          (yfinance Daily OHLCV)                     (yfinance Cashflow & Info)
+                    |                                           |
+                    v                                           v
+            data/ohlcv/*.csv                           data/fundamentals/*.json
+        (Up to 25 yrs daily bars)                   (Balance sheets, cashflows)
+
++----------------------------------------------------------------------------------------+
+|                      PHASE 2: THE 4-PILLAR QUANTITATIVE CORE                           |
++----------------------------------------------------------------------------------------+
+        data/ohlcv/*.csv                             data/fundamentals/*.json
+               |                                                 |
+       +-------+-------+------------------+                      |
+       |               |                  |                      |
+       v               v                  v                      v
+ [ml_engine.py] [smart_money_engine.py] [risk_manager.py] [dcf_engine.py]
+  Random Forest   OBV + Volume Spikes   Nifty SMA50/200    DCF Intrinsic Val
+  5-Day Trend &   Accumulation vs.      India VIX Vol      Margin of Safety
+  Confidence      Distribution          Market Breadth     Under/Fair/Over
+  (Max 35 pts)    (Max 15 pts)          (Max 25 pts)       (Max 25 pts)
+       |               |                  |                      |
+       +---------------+--------+---------+----------------------+
+                                |
+                                v
+                      [decision_engine.py]
+                 100-Point Composite Scoring System
+                                |
+                      Is |Score| > 30 points?
+                                |
+                   +------------+------------+
+                   | YES                     | NO
+                   v                         v
+              ACTIONABLE SIGNAL             HOLD
+              (BUY or SELL)             (No Action)
+                   |
+                   v
+           [risk_manager.py]
+           - True Range / ATR Dynamic Stop Loss (1.5x ATR)
+           - Asymmetric Risk-Reward Take Profit (2.5x Risk)
+           - 2% Maximum Capital at Risk per Position
+           - Sizing Scaled by Trend Conviction & S/R Distance
+                   |
+                   v
+       FINAL POSITION STRUCT: [Qty, Entry, StopLoss, TakeProfit]
+
++----------------------------------------------------------------------------------------+
+|                              PHASE 3: EXECUTION TARGETS                                |
++----------------------------------------------------------------------------------------+
+             /                                          \
+            /                                            \
+           v                                              v
+   [main.py] LIVE TERMINAL                      [backtester.py] PREDICTOR
+   - Single-pass high-speed scanner             - Real ML engine & macro regime
+   - In-memory DCF JSON caching                 - 5-Day forward price target math
+   - Real-time market breadth tracking          - Edge ranking & sorted leaderboard
+   - Rich Bloomberg Terminal ASCII UI           - Shares main.py's engines exactly
+                                                           \
+                                                            v
+                                                [walkforward_backtest.py] VALIDATOR
+                                                - Strict point-in-time walk-forward sim
+                                                - PnL, hit rate, drawdown, per-year report
+
+
+==========================================================================================
+3. END-TO-END EXECUTION PIPELINE
+==========================================================================================
+The pipeline operates in three sequential phases:
+
+Stage 1: Ingestion & Incremental Synchronization
+   1. nifty50_constituents.csv defines the active asset universe.
+   2. import_data.py reads each symbol, queries existing CSV files in data/ohlcv/, finds the 
+      last recorded date, and only downloads incremental delta bars from Yahoo Finance.
+   3. fundamental_fetcher.py inspects file age and skips downloading company financials if 
+      cached data is less than 365 days old.
+   4. All price data and fundamental metrics are stored locally for ultra-fast, zero-network 
+      offline computation during market hours.
+
+Stage 2: Analytics & Multi-Factor Scoring
+   1. main.py loads ^NSEI (Nifty 50 Index) and ^INDIAVIX to establish the macro baseline.
+   2. For each stock, it checks length constraints (requires at least 500 bars for statistical
+      validity in ML training).
+   3. The ML Engine extracts engineered features (Mom_20, Mom_50, RSI, MACD_Norm, Volatility, 
+      Vol_Change) and trains a Random Forest classifier to predict 5-day forward direction.
+   4. The DCF Engine computes the present value of 5-year projected Free Cash Flows plus 
+      Terminal Value using Indian market standard WACC (11%) and long-term GDP growth (5%), 
+      then compares intrinsic value with market price.
+   5. The Smart Money Engine analyzes volume-weighted price direction using On-Balance Volume 
+      (OBV) and directional volume ratios.
+   6. The Decision Engine aggregates all four outputs into a composite score [-100 to +100].
+
+Stage 3: Risk Sizing & Output Delivery
+   1. If the score exceeds +30 (BUY) or drops below -30 (SELL), RiskManager calculates exact 
+      shares to trade such that an adverse price movement to the ATR stop loss loses at most 
+      2.0% of total capital.
+   2. main.py renders the complete portfolio breakdown, regime status, and top 10 actionable 
+      trades onto the terminal using ANSI colors and Unicode box tables.
+   3. backtester.py computes forward projection paths, comparing predicted prices against 
+      current prices and printing an edge hierarchy.
+   4. walkforward_backtest.py replays the identical pipeline over history with strictly 
+      point-in-time data to measure real PnL, hit rate and drawdown.
+
+
+==========================================================================================
+4. THE HYBRID ENGINE: HOW ALL COMPONENTS WORK TOGETHER
+==========================================================================================
+
+4.1. MACHINE LEARNING ENGINE (ml_engine.py)
+-------------------------------------------
+- Model Architecture: Random Forest Classifier (50 trees, max_depth=6, class_weight='balanced', 
+  subsample max_samples=0.5 for fast training, n_jobs=-1).
+- Feature Engineering:
+  * Mom_20: (Close - SMA_20) / SMA_20 (Short-term trend divergence)
+  * Mom_50: (Close - SMA_50) / SMA_50 (Medium-term trend divergence)
+  * RSI: 14-period Wilder Relative Strength Index
+  * MACD_Norm: ((EMA_12 - EMA_26) / Close) * 100 (Percentage-scaled MACD)
+  * Volatility: 20-day rolling standard deviation of percentage returns
+  * Vol_Change: 5-day rolling average of volume percentage changes
+- Target Variable: Binary classification flag whether the 5-day forward price change exceeds 
+  +0.5% (future_return > 0.005).
+- Output: Direction ('UP' or 'DOWN'), Model Confidence [0.0 to 1.0], Predicted 5-Day Price, 
+  and Current RSI.
+
+4.2. DISCOUNTED CASH FLOW ENGINE (dcf_engine.py)
+------------------------------------------------
+- Formulation: Free Cash Flow to Firm (FCFF) Model:
+    FCF = Operating Cashflow - Capital Expenditures
+    Net Debt = Total Debt - Total Cash
+    Dynamic Growth Rate = Clip(0.5 * (FCF / Market Cap), 5%, 15%)
+    Discount Rate (WACC) = 11.0% (Risk-free rate + Equity Risk Premium for India)
+    Terminal Growth Rate = 5.0% (Long-term Indian nominal GDP growth expectation)
+- Value Calculation:
+    PV of 5-Year FCFs = Sum(FCF_t / (1 + WACC)^t) for t = 1..5
+    Terminal Value = (FCF_5 * (1 + g)) / (WACC - g)
+    PV of Terminal Value = Terminal Value / (1 + WACC)^5
+    Enterprise Value = PV(FCFs) + PV(Terminal Value)
+    Equity Value = Enterprise Value - Net Debt
+    Intrinsic Value per Share = Equity Value / Shares Outstanding
+- Valuation Status:
+    Margin of Safety = (Intrinsic Value - Current Price) / Intrinsic Value
+    * Margin > +15%  --> 'Undervalued'
+    * Margin < -15%  --> 'Overvalued'
+    * -15% to +15%   --> 'Fair Value'
+- Banking / Financial Sector Guard: If FCF is negative or zero (standard for banks like HDFCBANK 
+  where operating cash flow is not meaningful in traditional DCF), the engine safely falls 
+  back to 'Fair Value' with 0 margin to prevent mathematical distortion.
+
+4.3. SMART MONEY VOLUME ENGINE (smart_money_engine.py)
+------------------------------------------------------
+- Analyzes institutional accumulation and distribution over a 20-day rolling window:
+  1. On-Balance Volume (OBV) = Cumulative sum of Volume * Sign(Price Delta)
+  2. OBV Trend = Current OBV > 20-day Simple Moving Average of OBV
+  3. Up/Down Volume Ratio = Average volume on positive days / Average volume on negative days
+- Classification:
+  * Accumulation: OBV is above its 20-day SMA AND Up/Down volume ratio > 1.10
+  * Distribution: OBV is below its 20-day SMA AND Up/Down volume ratio < 0.90
+  * Neutral: Volume and price trend are in balance.
+
+4.4. MACRO REGIME & VOLATILITY FILTER (risk_manager.py)
+-------------------------------------------------------
+- Analyzes index-level context to prevent counter-trend or high-volatility disaster trades:
+  1. Market Trend: Nifty 50 SMA 50 > SMA 200 --> 'TRENDING' (Bullish regime) vs. 'RANGING'
+  2. Volatility: India VIX > 18.0 --> 'HIGH VOL' (Defensive posture) vs. 'LOW VOL'
+  3. Market Breadth: Percentage of universe stocks trading above their 50-day moving average.
+
+4.5. 100-POINT SCORING DECISION MATRIX (decision_engine.py)
+-----------------------------------------------------------
+The decision engine synthesizes all inputs into an absolute score ranging from -100 to +100:
+
++----------------------+--------------------+-------------------------------------------+
+| Factor               | Max Point Weight   | Logic & Allocation                        |
++----------------------+--------------------+-------------------------------------------+
+| 1. Machine Learning  | +/- 35 Points      | +35 * Confidence (if UP)                  |
+|                      |                    | -35 * Confidence (if DOWN)                |
++----------------------+--------------------+-------------------------------------------+
+| 2. DCF Valuation     | +/- 25 Points      | +25 (Undervalued)                         |
+|                      |                    | +12 (Fair Value momentum)                 |
+|                      |                    | -25 (Overvalued)                          |
++----------------------+--------------------+-------------------------------------------+
+| 3. Macro Regime      | +/- 25 Points      | Trend: +12 (Trending) or -8 (Ranging)     |
+|                      |                    | Vol  : +8 (Low Vol) or -15 (High Vol)     |
+|                      |                    | Breadth: +13 (>60%) or -13 (<40%)         |
++----------------------+--------------------+-------------------------------------------+
+| 4. Smart Money       | +/- 15 Points      | +15 (Accumulation)                        |
+|                      |                    | -15 (Distribution)                        |
+|                      |                    |   0 (Neutral)                             |
++----------------------+--------------------+-------------------------------------------+
+| 5. Sector Rotation   | +/- 5 Points       | Optional relative sector strength bias    |
++----------------------+--------------------+-------------------------------------------+
+
+Trigger Thresholds:
+- Raw Score > +30.0  --> Action: BUY
+- Raw Score < -30.0  --> Action: SELL (Short)
+- -30.0 to +30.0     --> Action: HOLD (Preserve Capital)
+
+Timing Optimization (RSI Filter):
+- In a BUY setup:
+  * RSI < 30 --> "OVERSOLD BUY" (Immediate entry)
+  * RSI > 65 --> "WAIT FOR DIP" (Limit order halfway between price and stop loss)
+  * 30 to 65 --> "BUY NOW" (Market order)
+- In a SELL setup:
+  * RSI > 70 --> "OVERBOUGHT SELL"
+  * RSI < 35 --> "WAIT FOR BOUNCE"
+  * 35 to 70 --> "SELL NOW"
+
+4.6. POSITION SIZING & ATR RISK MANAGEMENT (risk_manager.py)
+------------------------------------------------------------
+- Stop Loss Distance: Max(1.5 * ATR_14, 2.0% of Current Price)
+- Take Profit Distance: 2.5 * Stop Loss Distance (Asymmetric 1:2.5 Risk-Reward Ratio)
+- Base Risk Budget: 2% of total portfolio capital (e.g. ₹2,000 on ₹100,000 capital).
+- Raw Quantity Calculation:
+    Max Loss = Total Capital * 0.02
+    Raw Quantity = Floor(Max Loss / Stop Loss Distance)
+    Scaled Quantity = Max(1, Floor(Raw Quantity * Signal Strength))
+- Asymmetric Macro Allocation Caps:
+    * Trending Market + Conviction >= 0.60: Max 15% of Portfolio in one stock
+    * Trending Market + Conviction >= 0.40: Max 10% of Portfolio in one stock
+    * Ranging Market or Lower Conviction : Max 5% of Portfolio in one stock
+
+
+==========================================================================================
+5. DEEP-DIVE CODE EXPLANATION: import_data.py
+==========================================================================================
+File: import_data.py
+Role: Automated Bulk Ingestion and Historical Synchronization Engine.
+
+Key Functions & Flow:
+1. bulk_import():
+   - Reads nifty50_constituents.csv to extract the list of target tickers.
+   - Ensures local storage directories exist ('data/ohlcv' and 'data/fundamentals').
+   - Fetches benchmark index data first:
+     * ^NSEI: Nifty 50 Index (Used for macro-trend evaluation).
+     * ^INDIAVIX: Volatility Index (Used for volatility regime evaluation).
+   - Iterates through all 50 constituent symbols sequentially.
+
+2. Integration with data_fetcher.py (fetch_ohlcv_incremental):
+   - Opens local CSV if it exists and identifies the last recorded date.
+   - Compares the last date to yesterday's date.
+   - If data is already current, skips network download entirely (zero API overhead).
+   - If data is stale, downloads only the missing delta bars (start=last_date + 1 day).
+   - Concatenates existing and new bars, drops duplicate indices, and rewrites the CSV.
+
+3. Integration with fundamental_fetcher.py (fetch_fundamentals):
+   - Checks the timestamp of data/fundamentals/{symbol}_info.json.
+   - If the file is less than 365 days old, skips downloading to prevent hitting Yahoo 
+     Finance rate limits.
+   - If missing or stale, downloads Balance Sheet, Cash Flow, Financials, and Info.
+
+4. Rate-Limiting Protection:
+   - Includes time.sleep(0.5) after active API downloads to prevent Yahoo IP throttling.
+
+
+==========================================================================================
+6. DEEP-DIVE CODE EXPLANATION: main.py
+==========================================================================================
+File: main.py
+Role: Production CLI Screener, Live Trade Generation & Bloomberg Terminal Interface.
+
+Step-by-Step Code Walkthrough:
+
+1. Initialization & Encoding Setup (Lines 1-23):
+   - Calls sys.stdout.reconfigure(encoding='utf-8') to prevent UnicodeEncodeError on Windows.
+   - Instantiates BloombergTerminal, RiskManager(total_capital=100000), DecisionEngine, 
+     and SmartMoneyEngine.
+
+2. Pre-loading & Macro Baseline (Lines 24-53):
+   - Loads ^NSEI and ^INDIAVIX into memory.
+   - Pre-loads all DCF JSON files into a Python dictionary (dcf_cache) in RAM upfront. 
+     This reduces disk I/O from 50 separate read operations to an instant RAM lookup.
+   - Computes base market regime (trend and volatility).
+
+3. Single-Pass Scanning Loop (Lines 68-163):
+   - Loops over all 50 symbols with an overwriting progress indicator (\r).
+   - Dynamic Breadth Calculation: Calculates whether each stock is above its 50-day SMA 
+     on the fly without re-reading files, updating the live regime breadth percentage.
+   - Data Threshold Check: Skips stocks with fewer than 500 bars to prevent ML failure.
+   - Engine Execution per Stock:
+     * ml.train(df): Trains the Random Forest on historical features.
+     * ml.predict(df): Predicts 5-day direction, confidence, and RSI.
+     * smart_money_engine.analyze(df): Calculates OBV and volume accumulation.
+     * run_dcf_from_local(symbol, price, info_override=...): Evaluates intrinsic valuation.
+     * decision_engine.generate_signal(...): Generates score, action, and timing.
+     * risk_mgr.calculate_position(...): Computes ATR stop loss, take profit, and sizing.
+
+4. Trade Routing (Lines 123-160):
+   - LONG Signals (BUY): Calculates limit trigger (if waiting for dip) or market entry, 
+     computes trailing stop activation price, and appends to recommendations.
+   - SHORT Signals (SELL): Computes short selling parameters, limit trigger on bounce, 
+     and adds to short_recommendations.
+
+5. Terminal Dashboard Rendering (Lines 170-213):
+   - Sorts setups into Undervalued (Value), Fair Value (Momentum), and Overvalued (Short).
+   - Assembles portfolio summary (Capital, Deployed, Remaining Cash, Edge Score).
+   - Calls terminal.render(dashboard_data) in dashboard.py, drawing ANSI color-coded 
+     boxes and summary tables.
+
+
+==========================================================================================
+7. DEEP-DIVE CODE EXPLANATION: backtester.py
+==========================================================================================
+File: backtester.py
+Role: 5-Day Forward Price Prediction & Edge Ranking Engine (shares main.py's engines).
+
+Key Components & Logic:
+
+1. ForwardPredictor Class:
+   - Synchronized Engines: Uses the exact same DecisionEngine, SmartMoneyEngine,
+     MLEngine and MarketRegime classes as main.py, so the prediction leaderboard
+     and the live screener can no longer disagree through different inputs.
+
+2. Real Macro Regime (one pass before scanning):
+   - Loads ^NSEI and ^INDIAVIX and computes trend (SMA 50 > SMA 200) and
+     volatility (VIX > 18) exactly like main.py.
+   - Market breadth (% of constituents above their 50-day SMA) is computed for
+     the whole universe upfront, so every symbol is scored on the same,
+     order-independent breadth value.
+
+3. Real ML Engine per Symbol:
+   - Trains MLEngine on the symbol's full local history and predicts 5-day
+     direction, confidence and RSI, identical to main.py.
+   - Symbols failing the 500-bar training gate are skipped, same as main.py.
+
+4. 5-Day Extrapolation Mathematics:
+   - For a BUY signal:
+       Move Multiplier = (Raw Score - 30) / 100
+       Predicted Price = Current Price * (1 + Move Multiplier * 0.02)
+   - For a SELL signal:
+       Move Multiplier = (-Raw Score - 30) / 100
+       Predicted Price = Current Price * (1 - Move Multiplier * 0.02)
+   - For a HOLD signal:
+       Predicted Price = Current Price (No edge detected)
+
+5. Leaderboard Generation (main):
+   - Sorts all predictions by absolute edge magnitude: abs(Score).
+   - Filters the top 15 highest-probability opportunities.
+   - Formats and displays an ASCII table:
+     [Symbol | Current Price | 5-Day Predicted | Action | Edge Score | Qualitative Logic]
+
+
+7b. WALK-FORWARD VALIDATION: walkforward_backtest.py
+------------------------------------------------------------------------------------------
+File: walkforward_backtest.py
+Role: Honest historical validation of the production pipeline (no look-ahead).
+
+- Every 5th Nifty trading day (weekly), the FULL scan is replayed exactly as it
+  would have looked on that day: MLEngine retrained strictly on data <= that
+  date, with the real SmartMoneyEngine / RiskManager / DecisionEngine /
+  MarketRegime classes and full-universe breadth at that date.
+- Execution model: entries at the NEXT trading day's open (or a 5-day limit
+  trigger for WAIT FOR DIP / BOUNCE), exits at the scanner's SL / 2.5x TP or a
+  20-day time stop; SL assumed to hit first when both are touched in one day;
+  0.1% cost per side; allocations can never exceed available cash.
+- Two variants: FULL (includes DCF - note fundamentals are one current snapshot,
+  i.e. look-ahead for past dates) and NO-DCF (DCF factor zeroed, the honest core).
+- Outputs backtest_results/: results.json, BACKTEST_REPORT.txt, equity_curve.png.
+- Known biases (disclosed in the report): survivorship bias (today's Nifty 50
+  list), weekly scan cadence, trailing-stop instructions not simulated.
+
+
+==========================================================================================
+8. DATA CONTRACTS & DIRECTORY STRUCTURE
+==========================================================================================
+
+d:\heart code/
+├── nifty50_constituents.csv      # Master list: Symbol, Company Name, Sector
+├── requirements.txt              # Dependencies: yfinance, pandas, numpy, scikit-learn
+├── flowchart.txt                 # ASCII flowchart diagram
+│
+├── DATA PIPELINE:
+│   ├── import_data.py            # Primary data sync script
+│   ├── data_fetcher.py           # Incremental OHLCV yfinance fetcher
+│   └── fundamental_fetcher.py    # Financial statements & info fetcher
+│
+├── ANALYTICAL ENGINES:
+│   ├── ml_engine.py              # Random Forest classification & RSI
+│   ├── dcf_engine.py             # Intrinsic DCF valuation & margin of safety
+│   ├── smart_money_engine.py     # On-Balance Volume & volume ratio analyzer
+│   ├── risk_manager.py           # Market regime, ATR stops, and position sizing
+│   └── decision_engine.py        # 100-point multi-factor scoring matrix
+│
+├── EXECUTION INTERFACES:
+│   ├── main.py                   # Production terminal scanner & trade alert system
+│   ├── dashboard.py              # Bloomberg-style ANSI color terminal UI renderer
+│   ├── backtester.py             # 5-day forward price projection & strategy ranking
+│   └── walkforward_backtest.py   # Point-in-time walk-forward validation & PnL report
+│
+└── DATA STORAGE:
+    ├── data/ohlcv/               # Daily historical bars: {SYMBOL}.csv, ^NSEI.csv, ^INDIAVIX.csv
+    └── data/fundamentals/        # Financial JSONs: {SYMBOL}_info.json, {SYMBOL}_cashflow.csv
+
+
+==========================================================================================
+9. OPERATIONAL RUN GUIDE & CLI COMMANDS
+==========================================================================================
+
+1. Install Dependencies:
+   pip install -r requirements.txt
+
+2. Update Historical Data & Financials (Run periodically or after market close):
+   python import_data.py
+
+3. Run Live Bloomberg Terminal Screener:
+   python main.py
+
+4. Run 5-Day Strategy Prediction & Ranking Engine:
+   python backtester.py
+
+5. Run Walk-Forward Validation (point-in-time historical PnL / hit rate / drawdown):
+   python walkforward_backtest.py --start 2016-01-01
+
+==========================================================================================
+                                  END OF REPORT
+==========================================================================================
